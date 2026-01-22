@@ -3,19 +3,20 @@ import numpy as np
 from ultralytics import YOLO
 from tensorflow.keras.models import load_model
 from collections import Counter
+from skimage.feature import local_binary_pattern
 import os
 
 # ================= PATHS =================
-YOLO_MODEL = r"C:\Users\Admin\Downloads\PERFECT_ROCK_CLASS\best.pt"
-H5_MODEL   = r"C:\Users\Admin\Downloads\ROCK_CLASS\rock_classifier.h5"
-INPUT_IMG  = r"C:\Users\Admin\Downloads\ROCK_CLASS\images\dataset_origin\gravel\img_000505.jpg"
-OUTPUT_IMG = r"C:\Users\Admin\Downloads\PERFECT_ROCK_CLASS\output.jpg"
+YOLO_MODEL = r"C:\Users\Sanjay\Downloads\ROCK_FINAL\best.pt"
+H5_MODEL   = r"C:\Users\Sanjay\Downloads\ROCK_FINAL\rock_classifier_best.h5"
+INPUT_IMG  = r"C:\Users\Sanjay\Downloads\ROCK_FINAL\dataset_test\dataset_origin\red_brick\img_000400.jpg"
+OUTPUT_IMG = r"C:\Users\Sanjay\Downloads\ROCK_FINAL\output.jpg"
 
 # ================= CONFIG =================
 GRID_SIZE = 4
 IMG_SIZE = 224
+rock_counter = Counter()
 
-# CORRECT CLASS ORDER (ALPHABETICAL)
 CLASS_NAMES = [
     "gravel",     # 0
     "pebble",     # 1
@@ -27,47 +28,63 @@ CLASS_NAMES = [
 yolo = YOLO(YOLO_MODEL)
 clf = load_model(H5_MODEL)
 
-assert len(CLASS_NAMES) == clf.output_shape[-1], \
-    "❌ CLASS_NAMES mismatch with H5 output"
-
-# ================= LOAD IMAGE =================
+# ================= IMAGE =================
 img = cv2.imread(INPUT_IMG)
 if img is None:
-    print("❌ Image load aagala")
-    exit()
+    raise RuntimeError("❌ Image load failed")
 
 H, W, _ = img.shape
 tile_h = H // GRID_SIZE
 tile_w = W // GRID_SIZE
 
-# ================= PREPROCESS =================
-def preprocess(crop):
+# ================= FEATURE EXTRACTION =================
+def extract_color(img):
+    img = img.astype("float32") / 255.0
+    mean_rgb = np.mean(img, axis=(0,1))
+    hsv = cv2.cvtColor((img*255).astype(np.uint8), cv2.COLOR_RGB2HSV) / 255.0
+    mean_hsv = np.mean(hsv, axis=(0,1))
+    return np.concatenate([mean_rgb, mean_hsv])
+
+def extract_lbp(img):
+    gray = cv2.cvtColor(img, cv2.COLOR_RGB2GRAY)
+    lbp = local_binary_pattern(gray, P=8, R=1, method="uniform")
+    hist, _ = np.histogram(lbp, bins=10, range=(0,10), density=True)
+    return hist.astype("float32")
+
+def preprocess_all(crop):
     crop = cv2.resize(crop, (IMG_SIZE, IMG_SIZE))
-    crop = crop.astype("float32") / 255.0
-    return np.expand_dims(crop, axis=0)
+
+    img = crop.astype("float32") / 255.0
+    img = np.expand_dims(img, axis=0)
+
+    color = np.expand_dims(extract_color(crop), axis=0)
+    lbp   = np.expand_dims(extract_lbp(crop), axis=0)
+
+    return [img, color, lbp]
 
 # ================= 5 JUDGES =================
 def five_judges(crop):
     h, w, _ = crop.shape
+
     judges = [
         crop,
         crop[int(0.1*h):int(0.9*h), int(0.1*w):int(0.9*w)],
         cv2.flip(crop, 1),
-        cv2.convertScaleAbs(crop, alpha=1.2, beta=20),
-        cv2.convertScaleAbs(crop, alpha=0.8, beta=-20)
+        cv2.convertScaleAbs(crop, alpha=1.15, beta=15),
+        cv2.convertScaleAbs(crop, alpha=0.9, beta=-15)
     ]
 
     votes, confs = [], []
 
     for j in judges:
         j = cv2.resize(j, (w, h))
-        pred = clf.predict(preprocess(j), verbose=0)
-        idx = np.argmax(pred)
+        pred = clf.predict(preprocess_all(j), verbose=0)
+        idx = int(np.argmax(pred))
         votes.append(idx)
-        confs.append(pred[0][idx])
+        confs.append(float(pred[0][idx]))
 
     final_idx = Counter(votes).most_common(1)[0][0]
-    avg_conf = sum(confs) / len(confs)
+    avg_conf = float(np.mean(confs))
 
     return CLASS_NAMES[final_idx], avg_conf
 
@@ -86,7 +103,6 @@ for r in range(GRID_SIZE):
         for box in results.boxes:
             bx1, by1, bx2, by2 = map(int, box.xyxy[0])
 
-            # convert tile → original coords
             bx1 += x1; bx2 += x1
             by1 += y1; by2 += y1
 
@@ -95,21 +111,27 @@ for r in range(GRID_SIZE):
                 continue
 
             label, conf = five_judges(crop)
+            rock_counter[label] += 1
 
-            # YOLO → BOX ONLY
-            cv2.rectangle(img, (bx1, by1), (bx2, by2), (0, 255, 0), 2)
-
-            # H5 → TEXT ONLY
+            cv2.rectangle(img, (bx1, by1), (bx2, by2), (0,255,0), 2)
             cv2.putText(
-                img,
-                f"{label} {conf:.2f}",
-                (bx1, by1 - 6),
-                cv2.FONT_HERSHEY_SIMPLEX,
-                0.6,
-                (0, 255, 0),
-                2
+                img, f"{label} {conf:.2f}",
+                (bx1, by1-6),
+                cv2.FONT_HERSHEY_SIMPLEX, 0.6,
+                (0,255,0), 2
             )
 
-# ================= SAVE OUTPUT =================
+# ================= OUTPUT =================
 cv2.imwrite(OUTPUT_IMG, img)
-print("DONE – Full pipeline success")
+
+print("\n========== ROCK COUNT SUMMARY ==========")
+total = 0
+for cls in CLASS_NAMES:
+    cnt = rock_counter.get(cls, 0)
+    print(f"{cls:12s}: {cnt}")
+    total += cnt
+
+print("----------------------------------------")
+print(f"TOTAL ROCKS  : {total}")
+print("========================================")
+print("DONE – Full pipeline success ")
